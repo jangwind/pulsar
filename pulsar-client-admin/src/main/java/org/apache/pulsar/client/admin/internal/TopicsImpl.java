@@ -3431,5 +3431,13 @@ public class TopicsImpl extends BaseResource implements Topics {
         return asyncDeleteRequest(path);
     }
 
+    @Override
+    public CompletableFuture<Void> truncateAsync(String topic, boolean skipRetentionConstraint) {
+        TopicName tn = validateTopic(topic);
+        WebTarget path = topicPath(tn, "truncate") //
+                .queryParam("skipRetentionConstraint", Boolean.toString(skipRetentionConstraint));
+        return asyncDeleteRequest(path);
+    }
+
     private static final Logger log = LoggerFactory.getLogger(TopicsImpl.class);
 }

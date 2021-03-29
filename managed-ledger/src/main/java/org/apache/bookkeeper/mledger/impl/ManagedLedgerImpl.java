@@ -2257,6 +2257,10 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
      * @throws Exception
      */
     void internalTrimConsumedLedgers(CompletableFuture<?> promise) {
+        internalTrimLedgers(false, promise);
+    }
+
+    void internalTrimLedgers(boolean skipRetentionConstraint, CompletableFuture<?> promise) {
         // Ensure only one trimming operation is active
         if (!trimmerMutex.tryLock()) {
             scheduleDeferredTrimming(promise);
@@ -2313,10 +2317,10 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                     log.debug("[{}] Ledger {} skipped for deletion as it is currently being written to", name,
                             ls.getLedgerId());
                     break;
-                } else if (expired) {
+                } else if (expired && !skipRetentionConstraint) {
                     log.debug("[{}] Ledger {} has expired, ts {}", name, ls.getLedgerId(), ls.getTimestamp());
                     ledgersToDelete.add(ls);
-                } else if (overRetentionQuota) {
+                } else if (overRetentionQuota && !skipRetentionConstraint) {
                     log.debug("[{}] Ledger {} is over quota", name, ls.getLedgerId());
                     ledgersToDelete.add(ls);
                 } else {
@@ -3730,5 +3734,75 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     }
 
     private static final Logger log = LoggerFactory.getLogger(ManagedLedgerImpl.class);
+
+    @Override
+    public void asyncTruncate(boolean skipRetentionConstraint, boolean skipAcknowledgment, AsyncCallbacks.TruncateLedgerCallback callback, Object ctx) {
+        if (skipAcknowledgment) {
+            // roll ledger
+            STATE_UPDATER.set(this, State.ClosingLedger);
+            currentLedger.asyncClose(new AsyncCallback.CloseCallback() {
+                @Override
+                public void closeComplete(int rc, LedgerHandle lh, Object o) {
+                    checkArgument(currentLedger.getId() == lh.getId(), "ledgerId %s doesn't match with acked ledgerId %s",
+                            currentLedger.getId(),
+                            lh.getId());
+
+                    if (rc == BKException.Code.OK) {
+                        log.debug("Successfully closed ledger {}", lh.getId());
+                    } else {
+                        log.warn("Error when closing ledger {}. Status={}", lh.getId(), BKException.getMessage(rc));
+                    }
+
+                    ledgerClosed(lh);
+                    createLedgerAfterClosed();
+
+                    // cursor reset
+                    Position position = new PositionImpl(currentLedger.getId(), -1);
+                    List<CompletableFuture<Void>> futures = Lists.newArrayList();
+                    for (ManagedCursor cursor : getActiveCursors()) {
+                        ResetFuture resetFuture = new ResetFuture();
+                        cursor.asyncResetCursor(position, resetFuture);
+                        futures.add(resetFuture);
+                    }
+                    Futures.waitForAll(futures).thenApply(r -> {
+                        CompletableFuture<Object> future = CompletableFuture.completedFuture(null);
+
+                        // trim
+                        internalTrimLedgers(skipRetentionConstraint, future);
+                        future.thenAccept(ob -> callback.truncateLedgerComplete(ctx)).exceptionally(ex -> {
+                            callback.truncateLedgerFailed(ManagedLedgerException.getManagedLedgerException(ex.getCause()), ctx);
+                            return null;
+                        });
+                        return null;
+                    }).exceptionally(ex -> {
+                        callback.truncateLedgerFailed(ManagedLedgerException.getManagedLedgerException(ex.getCause()), ctx);
+                        return null;
+                    });
+                }
+            }, System.nanoTime());
+
+        } else {
+            // trim
+            CompletableFuture<Object> future = CompletableFuture.completedFuture(null);
+            internalTrimLedgers(skipRetentionConstraint, future);
+            future.thenAccept(ob -> callback.truncateLedgerComplete(ctx)).exceptionally(ex -> {
+                callback.truncateLedgerFailed(ManagedLedgerException.getManagedLedgerException(ex.getCause()), ctx);
+                return null;
+            });
+        }
+    }
+
+    public class ResetFuture extends CompletableFuture<Void> implements AsyncCallbacks.ResetCursorCallback {
+
+        @Override
+        public void resetComplete(Object ctx) {
+            complete(null);
+        }
+
+        @Override
+        public void resetFailed(ManagedLedgerException exception, Object ctx) {
+            completeExceptionally(exception);
+        }
+    }
 
 }

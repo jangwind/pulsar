@@ -871,4 +871,22 @@ public class ManagedLedgerFactoryImpl implements ManagedLedgerFactory {
     }
 
     private static final Logger log = LoggerFactory.getLogger(ManagedLedgerFactoryImpl.class);
+
+
+    @Override
+    public void asyncTruncate(String name, boolean skipRetentionConstraint, boolean skipAcknowledgment, AsyncCallbacks.TruncateLedgerCallback callback, Object ctx) {
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        asyncOpen(name, new OpenLedgerCallback() {
+            @Override
+            public void openLedgerComplete(ManagedLedger ledger, Object ctx) {
+                ledger.asyncTruncate(skipRetentionConstraint, skipAcknowledgment, callback, ctx);
+            }
+
+            @Override
+            public void openLedgerFailed(ManagedLedgerException e, Object ctx) {
+                callback.truncateLedgerFailed(e, ctx);
+            }
+        }, null);
+    }
+
 }

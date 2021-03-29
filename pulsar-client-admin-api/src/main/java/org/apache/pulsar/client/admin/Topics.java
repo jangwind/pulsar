@@ -3206,4 +3206,21 @@ public interface Topics {
      */
     CompletableFuture<Message<byte[]>> examineMessageAsync(String topic, String initialPosition, long messagePosition)
             throws PulsarAdminException;
+
+
+    /**
+     * Truncate a topic asynchronously.
+     * <p/>
+     * The topic cannot be truncated if it has retention constraint.
+     * You can choose to ignore retention constraid to delete ledgers.
+     * <p/>
+     *
+     * @param topic
+     *            topic name
+     * @param skipRetentionConstraint
+     *            Whether retention Constraint are ignored. Default false
+     *
+     * @return a future that can be used to track when the topic is truncated
+     */
+    CompletableFuture<Void> truncateAsync(String topic, boolean skipRetentionConstraint);
 }
