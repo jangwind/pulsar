@@ -83,6 +83,7 @@ import org.apache.bookkeeper.mledger.AsyncCallbacks.OpenCursorCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.OpenLedgerCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.ReadEntriesCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.ReadEntryCallback;
+import org.apache.bookkeeper.mledger.AsyncCallbacks.TruncateLedgerCallback;
 import org.apache.bookkeeper.mledger.Entry;
 import org.apache.bookkeeper.mledger.ManagedCursor;
 import org.apache.bookkeeper.mledger.ManagedCursor.IndividualDeletedEntries;
@@ -2909,4 +2910,108 @@ public class ManagedLedgerTest extends MockedBookKeeperTestCase {
         Assert.assertEquals(ledger.getLedgersInfoAsList().size(), 1);
         Assert.assertEquals(ledger.getTotalSize(), 0);
     }
+
+    @Test
+    public void testSkipRetentionDeletionLedgerClosed() throws Exception {
+        ManagedLedgerFactory factory = new ManagedLedgerFactoryImpl(bkc, bkc.getZkHandle());
+        ManagedLedgerConfig config = new ManagedLedgerConfig();
+        config.setRetentionSizeInMB(10);
+        config.setMaxEntriesPerLedger(1);
+        config.setRetentionTime(1000, TimeUnit.SECONDS);
+        config.setMaximumRolloverTime(1, TimeUnit.SECONDS);
+
+        ManagedLedgerImpl ml = (ManagedLedgerImpl) factory.open("skip_retention_deletion_test_ledger", config);
+        ManagedCursor c1 = ml.openCursor("testCursor1");
+        ManagedCursor c2 = ml.openCursor("testCursor2");
+        ml.addEntry("iamaverylongmessagethatshouldnotberetained".getBytes());
+        c1.skipEntries(1, IndividualDeletedEntries.Exclude);
+        c2.skipEntries(1, IndividualDeletedEntries.Exclude);
+        // if full to roll current ledger
+        ml.rollCurrentLedgerIfFull();
+        // ait 1.5 second
+        Thread.sleep(1500);
+        // delete the consumed ledger
+        ml.internalTrimLedgers(true, CompletableFuture.completedFuture(null));
+
+        // the closed and expired ledger should be deleted
+        assertTrue(ml.getLedgersInfoAsList().size() <= 1);
+        assertEquals(ml.getTotalSize(), 0);
+        ml.close();
+    }
+
+    @Test(timeOut = 20000)
+    public void asyncTruncateWithRetention() throws Exception {
+
+        ManagedLedgerFactory factory = new ManagedLedgerFactoryImpl(bkc, bkc.getZkHandle());
+        ManagedLedgerConfig config = new ManagedLedgerConfig();
+        config.setRetentionSizeInMB(10);
+        config.setRetentionTime(1000, TimeUnit.SECONDS);
+
+        ManagedLedgerImpl ledger = (ManagedLedgerImpl)factory.open("truncate_ledger", config);
+        ManagedCursor cursor = ledger.openCursor("test-cursor");
+        ManagedCursor cursor2 = ledger.openCursor("test-cursor2");
+        ledger.addEntry("test-entry-1".getBytes(Encoding));
+        ledger.addEntry("test-entry-1".getBytes(Encoding));
+        ledger.addEntry("test-entry-1".getBytes(Encoding));
+        ledger.addEntry("test-entry-1".getBytes(Encoding));
+        ledger.addEntry("test-entry-1".getBytes(Encoding));
+        ledger.addEntry("test-entry-1".getBytes(Encoding));
+        cursor.skipEntries(4, IndividualDeletedEntries.Exclude);
+
+        final CountDownLatch counter = new CountDownLatch(1);
+
+        ledger.asyncTruncate(new TruncateLedgerCallback() {
+            @Override
+            public void truncateLedgerComplete(Object ctx) {
+                assertNull(ctx);
+                counter.countDown();
+            }
+            @Override
+            public void truncateLedgerFailed(ManagedLedgerException exception, Object ctx) {
+                counter.countDown();
+            }
+        }, null);
+        counter.await();
+
+        assertTrue(ledger.getLedgersInfoAsList().size() <= 1);
+        assertEquals(ledger.getTotalSize(), 0);
+    }
+
+    @Test(timeOut = 20000)
+    public void asyncTruncateWithoutRetention() throws Exception {
+
+        ManagedLedgerFactory factory = new ManagedLedgerFactoryImpl(bkc, bkc.getZkHandle());
+        ManagedLedgerConfig config = new ManagedLedgerConfig();
+
+        ManagedLedgerImpl ledger = (ManagedLedgerImpl)factory.open("truncate_ledger", config);
+        ManagedCursor cursor = ledger.openCursor("test-cursor");
+        ManagedCursor cursor2 = ledger.openCursor("test-cursor2");
+        ledger.addEntry("test-entry-1".getBytes(Encoding));
+        ledger.addEntry("test-entry-1".getBytes(Encoding));
+        ledger.addEntry("test-entry-1".getBytes(Encoding));
+        ledger.addEntry("test-entry-1".getBytes(Encoding));
+        ledger.addEntry("test-entry-1".getBytes(Encoding));
+        ledger.addEntry("test-entry-1".getBytes(Encoding));
+        cursor.skipEntries(4, IndividualDeletedEntries.Exclude);
+
+        final CountDownLatch counter = new CountDownLatch(1);
+
+        ledger.asyncTruncate(new TruncateLedgerCallback() {
+            @Override
+            public void truncateLedgerComplete(Object ctx) {
+                assertNull(ctx);
+                counter.countDown();
+            }
+            @Override
+            public void truncateLedgerFailed(ManagedLedgerException exception, Object ctx) {
+                counter.countDown();
+            }
+        }, null);
+        counter.await();
+
+        assertTrue(ledger.getLedgersInfoAsList().size() <= 1);
+        assertEquals(ledger.getTotalSize(), 0);
+    }
+
+
 }

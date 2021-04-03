@@ -162,13 +162,12 @@ public interface ManagedLedgerFactory {
     void shutdown() throws InterruptedException, ManagedLedgerException;
 
     /**
-     * Tuncate a managed ledger. If the retention Constraint is ignored, the acknowledged message is deleted
+     * Tuncate a managed ledger.
      *
      * @param name
-     * @param skipRetentionConstraint
      * @param callback
      * @param ctx
      */
-    void asyncTruncate(String name, boolean skipRetentionConstraint, boolean skipAcknowledgment, TruncateLedgerCallback callback, Object ctx);
+    void asyncTruncate(String name, TruncateLedgerCallback callback, Object ctx);
 
 }

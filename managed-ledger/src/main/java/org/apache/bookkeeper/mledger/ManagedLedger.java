@@ -604,6 +604,6 @@ public interface ManagedLedger {
     /**
        Truncate ledgers
      */
-    void asyncTruncate(boolean skipRetentionConstraint, boolean skipAcknowledgment, AsyncCallbacks.TruncateLedgerCallback callback, Object ctx);
+    void asyncTruncate(AsyncCallbacks.TruncateLedgerCallback callback, Object ctx);
 
 }

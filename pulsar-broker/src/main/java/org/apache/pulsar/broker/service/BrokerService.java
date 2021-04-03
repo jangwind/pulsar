@@ -2636,7 +2636,7 @@ public class BrokerService implements Closeable, ZooKeeperCacheListener<Policies
 
         CompletableFuture<Void> future = new CompletableFuture<>();
 
-        managedLedgerFactory.asyncTruncate(tn.getPersistenceNamingEncoding(), skipRetentionConstraint, true, new TruncateLedgerCallback() {
+        managedLedgerFactory.asyncTruncate(tn.getPersistenceNamingEncoding(), new TruncateLedgerCallback() {
 
             @Override
             public void truncateLedgerComplete(Object ctx) {

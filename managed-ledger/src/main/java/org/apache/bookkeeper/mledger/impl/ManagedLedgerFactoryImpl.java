@@ -874,12 +874,12 @@ public class ManagedLedgerFactoryImpl implements ManagedLedgerFactory {
 
 
     @Override
-    public void asyncTruncate(String name, boolean skipRetentionConstraint, boolean skipAcknowledgment, AsyncCallbacks.TruncateLedgerCallback callback, Object ctx) {
+    public void asyncTruncate(String name, AsyncCallbacks.TruncateLedgerCallback callback, Object ctx) {
         CompletableFuture<Void> future = new CompletableFuture<>();
         asyncOpen(name, new OpenLedgerCallback() {
             @Override
             public void openLedgerComplete(ManagedLedger ledger, Object ctx) {
-                ledger.asyncTruncate(skipRetentionConstraint, skipAcknowledgment, callback, ctx);
+                ledger.asyncTruncate(callback, ctx);
             }
 
             @Override

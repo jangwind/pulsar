@@ -3443,10 +3443,9 @@ public class TopicsImpl extends BaseResource implements Topics {
     }
 
     @Override
-    public CompletableFuture<Void> truncateAsync(String topic, boolean skipRetentionConstraint) {
+    public CompletableFuture<Void> truncateAsync(String topic) {
         TopicName tn = validateTopic(topic);
-        WebTarget path = topicPath(tn, "truncate") //
-                .queryParam("skipRetentionConstraint", Boolean.toString(skipRetentionConstraint));
+        WebTarget path = topicPath(tn, "truncate"); //
         return asyncDeleteRequest(path);
     }
 

@@ -91,6 +91,7 @@ import org.apache.bookkeeper.mledger.AsyncCallbacks.ReadEntriesCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.ReadEntryCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.TerminateCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.UpdatePropertiesCallback;
+import org.apache.bookkeeper.mledger.AsyncCallbacks.TruncateLedgerCallback;
 import org.apache.bookkeeper.mledger.Entry;
 import org.apache.bookkeeper.mledger.ManagedCursor;
 import org.apache.bookkeeper.mledger.ManagedLedger;
@@ -2260,10 +2261,10 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         internalTrimLedgers(false, promise);
     }
 
-    void internalTrimLedgers(boolean skipRetentionConstraint, CompletableFuture<?> promise) {
+    void internalTrimLedgers(boolean isTruncate, CompletableFuture<?> promise) {
         // Ensure only one trimming operation is active
         if (!trimmerMutex.tryLock()) {
-            scheduleDeferredTrimming(promise);
+            internalTrimLedgers(isTruncate, promise);
             return;
         }
 
@@ -2282,19 +2283,23 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             }
 
             long slowestReaderLedgerId = -1;
-            if (!cursors.hasDurableCursors()) {
-                // At this point the lastLedger will be pointing to the
-                // ledger that has just been closed, therefore the +1 to
-                // include lastLedger in the trimming.
+            if (isTruncate) {
                 slowestReaderLedgerId = currentLedger.getId() + 1;
             } else {
-                PositionImpl slowestReaderPosition = cursors.getSlowestReaderPosition();
-                if (slowestReaderPosition != null) {
-                    slowestReaderLedgerId = slowestReaderPosition.getLedgerId();
+                if (!cursors.hasDurableCursors()) {
+                    // At this point the lastLedger will be pointing to the
+                    // ledger that has just been closed, therefore the +1 to
+                    // include lastLedger in the trimming.
+                    slowestReaderLedgerId = currentLedger.getId() + 1;
                 } else {
-                    promise.completeExceptionally(new ManagedLedgerException("Couldn't find reader position"));
-                    trimmerMutex.unlock();
-                    return;
+                    PositionImpl slowestReaderPosition = cursors.getSlowestReaderPosition();
+                    if (slowestReaderPosition != null) {
+                        slowestReaderLedgerId = slowestReaderPosition.getLedgerId();
+                    } else {
+                        promise.completeExceptionally(new ManagedLedgerException("Couldn't find reader position"));
+                        trimmerMutex.unlock();
+                        return;
+                    }
                 }
             }
 
@@ -2317,10 +2322,10 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                     log.debug("[{}] Ledger {} skipped for deletion as it is currently being written to", name,
                             ls.getLedgerId());
                     break;
-                } else if (expired && !skipRetentionConstraint) {
+                } else if (expired || isTruncate) {
                     log.debug("[{}] Ledger {} has expired, ts {}", name, ls.getLedgerId(), ls.getTimestamp());
                     ledgersToDelete.add(ls);
-                } else if (overRetentionQuota && !skipRetentionConstraint) {
+                } else if (overRetentionQuota || isTruncate) {
                     log.debug("[{}] Ledger {} is over quota", name, ls.getLedgerId());
                     ledgersToDelete.add(ls);
                 } else {
@@ -2344,7 +2349,11 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
 
             if (STATE_UPDATER.get(this) == State.CreatingLedger // Give up now and schedule a new trimming
                     || !metadataMutex.tryLock()) { // Avoid deadlocks with other operations updating the ledgers list
-                scheduleDeferredTrimming(promise);
+                if (isTruncate) {
+                    internalTrimLedgers(true, promise);
+                } else {
+                    scheduleDeferredTrimming(promise);
+                }
                 trimmerMutex.unlock();
                 return;
             }
@@ -3736,73 +3745,41 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     private static final Logger log = LoggerFactory.getLogger(ManagedLedgerImpl.class);
 
     @Override
-    public void asyncTruncate(boolean skipRetentionConstraint, boolean skipAcknowledgment, AsyncCallbacks.TruncateLedgerCallback callback, Object ctx) {
-        if (skipAcknowledgment) {
-            // roll ledger
-            STATE_UPDATER.set(this, State.ClosingLedger);
-            currentLedger.asyncClose(new AsyncCallback.CloseCallback() {
-                @Override
-                public void closeComplete(int rc, LedgerHandle lh, Object o) {
-                    checkArgument(currentLedger.getId() == lh.getId(), "ledgerId %s doesn't match with acked ledgerId %s",
-                            currentLedger.getId(),
-                            lh.getId());
+    public void asyncTruncate(TruncateLedgerCallback callback, Object ctx) {
+        STATE_UPDATER.set(this, State.ClosingLedger);
+        final ManagedLedgerImpl obj = this;
+        currentLedger.asyncClose((rc, lh, o) -> {
+            checkArgument(currentLedger.getId() == lh.getId(), "ledgerId %s doesn't match with acked ledgerId %s",
+                    currentLedger.getId(),
+                    lh.getId());
 
-                    if (rc == BKException.Code.OK) {
-                        log.debug("Successfully closed ledger {}", lh.getId());
-                    } else {
-                        log.warn("Error when closing ledger {}. Status={}", lh.getId(), BKException.getMessage(rc));
-                    }
+            if (rc == Code.OK) {
+                log.debug("Successfully closed ledger {}", lh.getId());
+            } else {
+                log.warn("Error when closing ledger {}. Status={}", lh.getId(), BKException.getMessage(rc));
+            }
 
-                    ledgerClosed(lh);
-                    createLedgerAfterClosed();
+            ledgerClosed(lh);
+            createLedgerAfterClosed();
+            rollLedgerAfterTrimForTruncate(callback, ctx);
+        }, System.nanoTime());
+    }
 
-                    // cursor reset
-                    Position position = new PositionImpl(currentLedger.getId(), -1);
-                    List<CompletableFuture<Void>> futures = Lists.newArrayList();
-                    for (ManagedCursor cursor : getActiveCursors()) {
-                        ResetFuture resetFuture = new ResetFuture();
-                        cursor.asyncResetCursor(position, resetFuture);
-                        futures.add(resetFuture);
-                    }
-                    Futures.waitForAll(futures).thenApply(r -> {
-                        CompletableFuture<Object> future = CompletableFuture.completedFuture(null);
-
-                        // trim
-                        internalTrimLedgers(skipRetentionConstraint, future);
-                        future.thenAccept(ob -> callback.truncateLedgerComplete(ctx)).exceptionally(ex -> {
-                            callback.truncateLedgerFailed(ManagedLedgerException.getManagedLedgerException(ex.getCause()), ctx);
-                            return null;
-                        });
-                        return null;
-                    }).exceptionally(ex -> {
-                        callback.truncateLedgerFailed(ManagedLedgerException.getManagedLedgerException(ex.getCause()), ctx);
-                        return null;
-                    });
-                }
-            }, System.nanoTime());
-
+    private void rollLedgerAfterTrimForTruncate(TruncateLedgerCallback callback, Object ctx) {
+        if (STATE_UPDATER.get(this) != State.LedgerOpened) {
+            scheduledExecutor.scheduleOrdered(name, safeRun(() -> rollLedgerAfterTrimForTruncate(callback, ctx)), 100, TimeUnit.MILLISECONDS);
+            return;
         } else {
-            // trim
+
             CompletableFuture<Object> future = CompletableFuture.completedFuture(null);
-            internalTrimLedgers(skipRetentionConstraint, future);
-            future.thenAccept(ob -> callback.truncateLedgerComplete(ctx)).exceptionally(ex -> {
+            internalTrimLedgers(true, future);
+            future.thenAccept(ob -> {
+                callback.truncateLedgerComplete(ctx);
+            }).exceptionally(ex -> {
+                log.error("[{}] trim ledger failed", name, ex);
                 callback.truncateLedgerFailed(ManagedLedgerException.getManagedLedgerException(ex.getCause()), ctx);
                 return null;
             });
         }
     }
-
-    public class ResetFuture extends CompletableFuture<Void> implements AsyncCallbacks.ResetCursorCallback {
-
-        @Override
-        public void resetComplete(Object ctx) {
-            complete(null);
-        }
-
-        @Override
-        public void resetFailed(ManagedLedgerException exception, Object ctx) {
-            completeExceptionally(exception);
-        }
-    }
-
 }

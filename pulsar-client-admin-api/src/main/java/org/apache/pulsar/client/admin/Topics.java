@@ -3234,10 +3234,8 @@ public interface Topics {
      *
      * @param topic
      *            topic name
-     * @param skipRetentionConstraint
-     *            Whether retention Constraint are ignored. Default false
      *
      * @return a future that can be used to track when the topic is truncated
      */
-    CompletableFuture<Void> truncateAsync(String topic, boolean skipRetentionConstraint);
+    CompletableFuture<Void> truncateAsync(String topic);
 }
