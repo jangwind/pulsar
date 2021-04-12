@@ -37,17 +37,7 @@ import io.netty.util.Recycler;
 import io.netty.util.Recycler.Handle;
 import io.netty.util.ReferenceCountUtil;
 import java.time.Clock;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.NavigableMap;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.Queue;
-import java.util.Random;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentLinkedDeque;
@@ -91,6 +81,7 @@ import org.apache.bookkeeper.mledger.AsyncCallbacks.ReadEntriesCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.ReadEntryCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.TerminateCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.UpdatePropertiesCallback;
+import org.apache.bookkeeper.mledger.AsyncCallbacks.TruncateLedgerCallback;
 import org.apache.bookkeeper.mledger.Entry;
 import org.apache.bookkeeper.mledger.ManagedCursor;
 import org.apache.bookkeeper.mledger.ManagedLedger;
@@ -2257,9 +2248,13 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
      * @throws Exception
      */
     void internalTrimConsumedLedgers(CompletableFuture<?> promise) {
+        internalTrimLedgers(false, promise);
+    }
+
+    void internalTrimLedgers(boolean isTruncate, CompletableFuture<?> promise) {
         // Ensure only one trimming operation is active
         if (!trimmerMutex.tryLock()) {
-            scheduleDeferredTrimming(promise);
+            internalTrimLedgers(isTruncate, promise);
             return;
         }
 
@@ -2278,19 +2273,23 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             }
 
             long slowestReaderLedgerId = -1;
-            if (!cursors.hasDurableCursors()) {
-                // At this point the lastLedger will be pointing to the
-                // ledger that has just been closed, therefore the +1 to
-                // include lastLedger in the trimming.
-                slowestReaderLedgerId = currentLedger.getId() + 1;
+            if (isTruncate) {
+                slowestReaderLedgerId = getLedgersInfoAsList().get(getLedgersInfoAsList().size()-1).getLedgerId() + 1;
             } else {
-                PositionImpl slowestReaderPosition = cursors.getSlowestReaderPosition();
-                if (slowestReaderPosition != null) {
-                    slowestReaderLedgerId = slowestReaderPosition.getLedgerId();
+                if (!cursors.hasDurableCursors()) {
+                    // At this point the lastLedger will be pointing to the
+                    // ledger that has just been closed, therefore the +1 to
+                    // include lastLedger in the trimming.
+                    slowestReaderLedgerId = currentLedger.getId() + 1;
                 } else {
-                    promise.completeExceptionally(new ManagedLedgerException("Couldn't find reader position"));
-                    trimmerMutex.unlock();
-                    return;
+                    PositionImpl slowestReaderPosition = cursors.getSlowestReaderPosition();
+                    if (slowestReaderPosition != null) {
+                        slowestReaderLedgerId = slowestReaderPosition.getLedgerId();
+                    } else {
+                        promise.completeExceptionally(new ManagedLedgerException("Couldn't find reader position"));
+                        trimmerMutex.unlock();
+                        return;
+                    }
                 }
             }
 
@@ -2309,14 +2308,14 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                             name, ls.getLedgerId(), (clock.millis() - ls.getTimestamp()) / 1000.0, expired,
                             overRetentionQuota, currentLedger.getId());
                 }
-                if (ls.getLedgerId() == currentLedger.getId()) {
+                if (ls.getLedgerId() == currentLedger.getId() && !isTruncate) {
                     log.debug("[{}] Ledger {} skipped for deletion as it is currently being written to", name,
                             ls.getLedgerId());
                     break;
-                } else if (expired) {
+                } else if (expired || isTruncate) {
                     log.debug("[{}] Ledger {} has expired, ts {}", name, ls.getLedgerId(), ls.getTimestamp());
                     ledgersToDelete.add(ls);
-                } else if (overRetentionQuota) {
+                } else if (overRetentionQuota || isTruncate) {
                     log.debug("[{}] Ledger {} is over quota", name, ls.getLedgerId());
                     ledgersToDelete.add(ls);
                 } else {
@@ -2340,12 +2339,18 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
 
             if (STATE_UPDATER.get(this) == State.CreatingLedger // Give up now and schedule a new trimming
                     || !metadataMutex.tryLock()) { // Avoid deadlocks with other operations updating the ledgers list
-                scheduleDeferredTrimming(promise);
+                if (isTruncate) {
+                    internalTrimLedgers(true, promise);
+                } else {
+                    scheduleDeferredTrimming(promise);
+                }
                 trimmerMutex.unlock();
                 return;
             }
 
-            advanceNonDurableCursors(ledgersToDelete);
+            if (!isTruncate) {
+                advanceNonDurableCursors(ledgersToDelete);
+            }
 
             PositionImpl currentLastConfirmedEntry = lastConfirmedEntry;
             // Update metadata
@@ -3730,5 +3735,59 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     }
 
     private static final Logger log = LoggerFactory.getLogger(ManagedLedgerImpl.class);
+
+
+    @Override
+    public void asyncTruncate(TruncateLedgerCallback callback, Object ctx) {
+
+        for (OpAddEntry entry : pendingAddEntries) {
+            pendingAddEntries.remove();
+        }
+
+        List<CompletableFuture<Void>> futures = Lists.newArrayList();
+        for (ManagedCursor cursor : cursors) {
+            CompletableFuture<Void> future = CompletableFuture.completedFuture(null);
+            System.out.println("currentLedger.getId() = " + currentLedger.getId());
+            Pair<PositionImpl, PositionImpl> pair = cursors.cursorUpdated(cursor, PositionImpl.get(currentLedger.getId(), Long.MAX_VALUE));
+            if (pair == null) {
+                // Cursor has been removed in the meantime
+                futures.add(future);
+                trimConsumedLedgersInBackground(future);
+                continue;
+            }
+
+            PositionImpl previousSlowestReader = pair.getLeft();
+            PositionImpl currentSlowestReader = pair.getRight();
+
+            if (previousSlowestReader.compareTo(currentSlowestReader) == 0) {
+                // The slowest consumer has not changed position. Nothing to do right now
+                continue;
+            }
+
+            // Only trigger a trimming when switching to the next ledger
+            if (previousSlowestReader.getLedgerId() != currentLedger.getId()) {
+                futures.add(future);
+                trimConsumedLedgersInBackground(future);
+            }
+        }
+        Futures.waitForAll(futures).thenApply(obj -> {
+            log.info("ledgerId = [{}]", currentLedger.getId());
+            CompletableFuture<Object> future = CompletableFuture.completedFuture(null);
+            internalTrimLedgers(true, future);
+            future.thenAccept(ob -> {
+                NUMBER_OF_ENTRIES_UPDATER.set(this, 0);
+                TOTAL_SIZE_UPDATER.set(this, 0);
+
+                callback.truncateLedgerComplete(ctx);
+            }).exceptionally(ex -> {
+                log.error("[{}] trim ledger failed", name, ex);
+                callback.truncateLedgerFailed(ManagedLedgerException.getManagedLedgerException(ex.getCause()), ctx);
+                return null;
+            });
+            return null;
+        }).exceptionally(ex -> {callback.truncateLedgerFailed(ManagedLedgerException.getManagedLedgerException(ex.getCause()), ctx);return null;});
+
+
+    }
 
 }

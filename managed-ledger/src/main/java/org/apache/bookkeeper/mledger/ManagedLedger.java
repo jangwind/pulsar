@@ -600,4 +600,10 @@ public interface ManagedLedger {
      * will got null if corresponding ledger not exists.
      */
     CompletableFuture<LedgerInfo> getLedgerInfo(long ledgerId);
+
+
+    /**
+     Truncate ledgers
+     */
+    void asyncTruncate(AsyncCallbacks.TruncateLedgerCallback callback, Object ctx);
 }
